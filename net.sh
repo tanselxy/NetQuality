@@ -1,5 +1,5 @@
 #!/bin/bash
-script_version="v2026-09-01-tansel.2"
+script_version="v2026-09-01-tansel.3"
 # tanselxy/NetQuality：xykt/NetQuality 的 fork（AGPL-3.0）。改动：
 # - ref/ 数据文件固定读取 ref_commit，不再跟随上游 main 变化；
 # - 去掉运行计数、广告、报告上传（upload.check.place）与菜单模式的远程执行；
@@ -8,7 +8,9 @@ script_version="v2026-09-01-tansel.2"
 # - apt 只装 stun-client，不再连带安装 stun-server 守护进程；
 # - 增加 Route（回程路由线路）JSON 段；正常结束时退出码为 0；
 # - JSON 的 Connectivity 每项增加 Links：连接图里该 AS 指向的上游 AS 号；
-# - 核心依赖（jq、curl、mtr、bc、free）安装失败时以退出码 12 立即结束。
+# - 核心依赖（jq、curl、mtr、bc、free）安装失败时以退出码 12 立即结束；
+# - 回程路由每项增加 Hops（逐跳明细：跳数、IP、最低延迟、AS、位置、运营商），
+#   nexttrace 加 -M，不再把路由上传到 nxtrace 生成轨迹地图。
 ref_commit="d5b99484d51286374d24b892c1b54235dc282148"
 NETQ_BIN="${NETQ_BIN:-/usr/local/bin}"
 nexttrace_version="v1.7.3"
@@ -1358,7 +1360,7 @@ local max_retries=10
 local retry_delay=5
 local retry_count=0
 while [[ $retry_count -lt $max_retries ]];do
-response=$(timeout -s SIGKILL 50 nexttrace -p 80 -q 8 -"$ipv" --"$rmode" --raw --psize 1400 "$domain" 2>/dev/null)
+response=$(timeout -s SIGKILL 50 nexttrace -p 80 -q 8 -"$ipv" --"$rmode" --raw -M --psize 1400 "$domain" 2>/dev/null)
 [[ $response != *"*please try again later*"* && $response == *"traceroute to"* ]]&&break
 retry_count=$((retry_count+1))
 [[ $retry_count -lt $max_retries ]]&&sleep "$retry_delay"
@@ -1393,6 +1395,10 @@ if ((hop>max_hop));then
 max_hop="$hop"
 fi
 done <<<"$response"
+# fork 新增：逐跳明细（跳数、IP、该跳最低延迟、AS、位置、运营商）写进临时文件，生成 JSON 时放进 Route[].Hops
+if [[ -n $route_hops_dir ]];then
+echo "$response"|awk -F'|' '$1 ~ /^[0-9]+$/ && NF>=10 {h=$1+0; for(k=2;k<=10;k++) gsub(/\t/," ",$k); if(!(h in ip)){ip[h]=$2; asn[h]=$5; loc[h]=$6" "$7" "$8; org[h]=$10} if($4!="" && (!(h in rtt) || $4+0<rtt[h]+0)) rtt[h]=$4; if(h>max) max=h} END {for(i=1;i<=max;i++){if(i in ip) printf "%d\t%s\t%s\t%s\t%s\t%s\n", i, ip[i], rtt[i], asn[i], loc[i], org[i]; else printf "%d\t*\t\t\t\t\n", i}}' >"$route_hops_dir/${ipv}_$rnum" 2>/dev/null
+fi
 [[ $cn_hop == 0 || $cn_hop == $max_hop ]]&&tresucn="Hidden"
 [[ ${asns[$cn_hop]} == "17676" ]]&&cn_hop=$((cn_hop+1))
 case "${asns[$cn_hop]}" in
@@ -1627,6 +1633,7 @@ local temp_info="$Font_Cyan$Font_B${sinfo[route]}$Font_Suffix"
 show_progress_bar "$temp_info" $((50-${sinfo[lroute]}))&
 bar_pid="$!"&&disown "$bar_pid"
 trap "kill_progress_bar" RETURN
+route_hops_dir=${route_hops_dir:-$(mktemp -d 2>/dev/null)}
 local ipv=$1
 local rdomain
 rdomain[1]="bj-ct-v$ipv.ip.zstaticcdn.com"
@@ -1866,7 +1873,7 @@ local max_retries=10
 local retry_delay=5
 local retry_count=0
 while [[ $retry_count -lt $max_retries ]];do
-output=$(timeout -s SIGKILL 50 nexttrace -p 80 -q 8 -"$ipv" "$tmode" --psize 1400 "$domain" 2>/dev/null)
+output=$(timeout -s SIGKILL 50 nexttrace -p 80 -q 8 -"$ipv" "$tmode" -M --psize 1400 "$domain" 2>/dev/null)
 [[ $output != *"*please try again later*"* && $output == *"traceroute to"* ]]&&break
 retry_count=$((retry_count+1))
 [[ $retry_count -lt $max_retries ]]&&sleep "$retry_delay"
@@ -2973,7 +2980,12 @@ case $(((site-1)%3)) in
 *)risp="CM"
 esac
 if ((i%2==0));then rproto="UDP";else rproto="TCP";fi
-route_objects+=("{\"City\": \"$rcity\", \"Code\": \"$rcode\", \"ISP\": \"$risp\", \"Protocol\": \"$rproto\", \"Global\": \"${rww[$i]:-null}\", \"China\": \"${rcn[$i]:-null}\"}")
+hops_json="[]"
+if [[ -n $route_hops_dir && -s "$route_hops_dir/$1_$i" ]];then
+hops_json=$(jq -R -s -c 'split("\n")|map(select(length>0)|split("\t")|{Hop:(.[0]|tonumber),IP:.[1],RTT:((.[2]|tonumber?)//null),ASN:(if (.[3]//"")=="" then null else .[3] end),Location:((.[4]//"")|gsub("\\s+";" ")|ltrimstr(" ")|rtrimstr(" ")),Org:(.[5]//"")})' "$route_hops_dir/$1_$i" 2>/dev/null)
+[[ -z $hops_json ]]&&hops_json="[]"
+fi
+route_objects+=("{\"City\": \"$rcity\", \"Code\": \"$rcode\", \"ISP\": \"$risp\", \"Protocol\": \"$rproto\", \"Global\": \"${rww[$i]:-null}\", \"China\": \"${rcn[$i]:-null}\", \"Hops\": $hops_json}")
 done
 local route_array
 route_array=$(printf '%s\n' "${route_objects[@]}"|jq -s .)
@@ -3067,4 +3079,5 @@ clear
 show_ad
 [[ $IPV4work -ne 0 && $IPV4check -ne 0 ]]&&check_Net "$IPV4" 4
 [[ $IPV6work -ne 0 && $IPV6check -ne 0 ]]&&check_Net "$IPV6" 6
+[[ -n $route_hops_dir ]]&&rm -rf "$route_hops_dir"
 exit 0
