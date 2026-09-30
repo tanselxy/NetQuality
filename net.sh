@@ -1,12 +1,14 @@
 #!/bin/bash
-script_version="v2026-09-01-tansel.1"
+script_version="v2026-09-01-tansel.2"
 # tanselxy/NetQuality：xykt/NetQuality 的 fork（AGPL-3.0）。改动：
 # - ref/ 数据文件固定读取 ref_commit，不再跟随上游 main 变化；
 # - 去掉运行计数、广告、报告上传（upload.check.place）与菜单模式的远程执行；
 # - nexttrace、speedtest、stun 改为固定版本，下载后核对 SHA-256 再安装到 $NETQ_BIN
 #   （默认 /usr/local/bin），不再使用 curl | bash；speedtest 取自 Ookla 官方安装包；
 # - apt 只装 stun-client，不再连带安装 stun-server 守护进程；
-# - 增加 Route（回程路由线路）JSON 段；正常结束时退出码为 0。
+# - 增加 Route（回程路由线路）JSON 段；正常结束时退出码为 0；
+# - JSON 的 Connectivity 每项增加 Links：连接图里该 AS 指向的上游 AS 号；
+# - 核心依赖（jq、curl、mtr、bc、free）安装失败时以退出码 12 立即结束。
 ref_commit="d5b99484d51286374d24b892c1b54235dc282148"
 NETQ_BIN="${NETQ_BIN:-/usr/local/bin}"
 nexttrace_version="v1.7.3"
@@ -79,6 +81,7 @@ declare -A corg
 declare -A ctarget
 declare -A ctier1
 declare -A cupstream
+declare -A clinks
 declare -A pcode
 declare -A pshort
 declare -A pname
@@ -869,6 +872,16 @@ current_block=""
 fi
 fi
 done <<<"$svg_content"
+# fork 新增：记下连接图里的每条边（客户 AS -> 上游 AS），写进 JSON 的 Connectivity[].Links
+local edge_re='^AS([0-9]+).*AS([0-9]+)$'
+local edge_arrow edge_title
+for edge_arrow in "${arrows[@]}";do
+edge_title=$(echo "$edge_arrow"|awk -F '[<>]' '/<title>/{print $3}')
+edge_title=$(replace_html_entities "$edge_title")
+if [[ $edge_title =~ $edge_re ]];then
+clinks[${BASH_REMATCH[1]}]+="${clinks[${BASH_REMATCH[1]}]:+,}${BASH_REMATCH[2]}"
+fi
+done
 local as_card
 local target_as_number=""
 for as_card in "${as_cards[@]}";do
@@ -963,6 +976,7 @@ corg=()
 ctarget=()
 ctier1=()
 cupstream=()
+clinks=()
 local RESPONSE=$(curl $CurlARG -$1 --user-agent "$UA_Browser" --max-time 10 -Ls "https://bgp.tools/prefix/$IP")
 if [[ $RESPONSE == *"Overlapping Prefixes Detected"* ]];then
 bgp[prefix]=$(echo "$RESPONSE"|grep -o 'href="/prefix/[^"]*'|head -1|cut -d'/' -f3-)
@@ -2877,7 +2891,7 @@ for id in $(echo "${!casn[@]}"|tr ' ' '\n'|sort -n);do
 if [[ -z ${casn[$id]} ]];then
 continue
 fi
-connectivity_updates+=".Connectivity += [{\"ID\": $id, \"ASN\": ${casn[$id]:-null}, \"Org\": \"${corg[$id]:-null}\", \"IsTarget\": $([[ ${ctarget[$id]} == "true" ]]&&echo true||echo false), \"IsTier1\": $([[ ${ctier1[$id]} == "true" ]]&&echo true||echo false), \"IsUpstream\": $([[ ${cupstream[$id]} == "true" ]]&&echo true||echo false)}] | "
+connectivity_updates+=".Connectivity += [{\"ID\": $id, \"ASN\": ${casn[$id]:-null}, \"Org\": \"${corg[$id]:-null}\", \"IsTarget\": $([[ ${ctarget[$id]} == "true" ]]&&echo true||echo false), \"IsTier1\": $([[ ${ctier1[$id]} == "true" ]]&&echo true||echo false), \"IsUpstream\": $([[ ${cupstream[$id]} == "true" ]]&&echo true||echo false), \"Links\": [${clinks[${casn[$id]}]}]}] | "
 done
 netdata=$(echo "$netdata"|jq "$head_updates$bgp_updates$local_updates$connectivity_updates.")
 local delay_objects=()
@@ -3032,6 +3046,17 @@ is_valid_ipv4 $IPV4
 is_valid_ipv6 $IPV6
 get_opts "$@"
 [[ mode_no -eq 0 ]]&&install_dependencies 1>&2
+# fork 新增：核心依赖没装上（如包管理器下载失败）就直接退出，退出码 12；
+# 否则缺 jq / mtr / bc / free 时脚本会串行重试路由探测，空跑几个小时
+missing_deps=""
+for dep in jq curl mtr bc;do
+command -v "$dep" >/dev/null 2>&1||missing_deps+=" $dep"
+done
+[[ "$(uname)" != "Darwin" ]]&&! command -v free >/dev/null 2>&1&&missing_deps+=" free"
+if [[ -n $missing_deps ]];then
+echo "Missing dependencies:$missing_deps" >&2
+exit 12
+fi
 set_language
 read_ref
 if [[ $ERRORcode -ne 0 ]];then
