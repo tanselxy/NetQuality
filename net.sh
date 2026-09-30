@@ -1,5 +1,30 @@
 #!/bin/bash
-script_version="v2026-09-01"
+script_version="v2026-09-01-tansel.1"
+# tanselxy/NetQuality：xykt/NetQuality 的 fork（AGPL-3.0）。改动：
+# - ref/ 数据文件固定读取 ref_commit，不再跟随上游 main 变化；
+# - 去掉运行计数、广告、报告上传（upload.check.place）与菜单模式的远程执行；
+# - nexttrace、speedtest、stun 改为固定版本，下载后核对 SHA-256 再安装到 $NETQ_BIN
+#   （默认 /usr/local/bin），不再使用 curl | bash；speedtest 取自 Ookla 官方安装包；
+# - apt 只装 stun-client，不再连带安装 stun-server 守护进程；
+# - 增加 Route（回程路由线路）JSON 段；正常结束时退出码为 0。
+ref_commit="d5b99484d51286374d24b892c1b54235dc282148"
+NETQ_BIN="${NETQ_BIN:-/usr/local/bin}"
+nexttrace_version="v1.7.3"
+declare -A nexttrace_sha256=(
+[amd64]="aa75440fcdee46c16d941f48f9dabee1eb4c35bea6b739b0960fcf8307088c29"
+[arm64]="4fbf436e2d4737e4a491e71ce3cd140a7a268d43ec94fb9ac9497aec7eda080e"
+[386]="60880efb862b217071a32308f29768938cea06209827b41ac15e5bab12225d66"
+[armv7]="d7741bd54a5cae13acf5decb6576216fb355f9dfbcb830b29aea092e08606979")
+speedtest_version="1.2.0"
+declare -A speedtest_sha256=(
+[x86_64]="5690596c54ff9bed63fa3732f818a05dbc2db19ad36ed68f21ca5f64d5cfeeb7"
+[aarch64]="3953d231da3783e2bf8904b6dd72767c5c6e533e163d3742fd0437affa431bd3"
+[i386]="9ff7e18dbae7ee0e03c66108445a2fb6ceea6c86f66482e1392f55881b772fe8"
+[armhf]="e45fcdebbd8a185553535533dd032d6b10bc8c64eee4139b1147b9c09835d08d")
+declare -A stun_sha256=(
+[amd64]="ab83fd14b770185c2d45df714175774ae4b60e089f6dc9baaff582beea301d5f"
+[arm64]="dfa68621268777f9bf3369644295cceef5cac6cbacb3e563dfc7d4fa8371fc41"
+[i386]="072e6c83fdcb7b37abf90900d50671cb808c88ac7d055b9f509b67b59c5c66a5")
 check_bash(){
 current_bash_version=$(bash --version|head -n 1|awk '{for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+(\.[0-9]+)?/) print $i}')
 major_version=$(echo "$current_bash_version"|cut -d'.' -f1)
@@ -7,7 +32,7 @@ minor_version=$(echo "$current_bash_version"|cut -d'.' -f2)
 if [ "$major_version" -lt 4 ]||{ [ "$major_version" -eq 4 ]&&[ "$minor_version" -lt 3 ];};then
 echo "ERROR: Bash version is $current_bash_version lower than 4.3!"
 echo "Tips: Run the following script to automatically upgrade Bash."
-echo "bash <(curl -sL https://raw.githubusercontent.com/xykt/NetQuality/main/ref/upgrade_bash.sh)"
+echo "bash <(curl -sL https://raw.githubusercontent.com/tanselxy/NetQuality/$ref_commit/ref/upgrade_bash.sh)"
 exit 0
 fi
 }
@@ -197,7 +222,7 @@ sinfo[ldelayww]=25
 shead[title]="NET QUALITY CHECK REPORT: "
 shead[ver]="Version: $script_version"
 shead[bash]="bash <(curl -sL https://Check.Place) -EN"
-shead[git]="https://github.com/xykt/NetQuality"
+shead[git]="https://github.com/tanselxy/NetQuality"
 shead[time_raw]=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
 shead[time]="Report Time: ${shead[time_raw]}"
 shead[ltitle]=26
@@ -295,7 +320,7 @@ sinfo[ldelayww]=27
 shead[title]="网络质量体检报告："
 shead[ver]="脚本版本：$script_version"
 shead[bash]="bash <(curl -sL https://Check.Place) -N"
-shead[git]="https://github.com/xykt/NetQuality"
+shead[git]="https://github.com/tanselxy/NetQuality"
 shead[time_raw]=$(TZ="Asia/Shanghai" date +"%Y-%m-%d %H:%M:%S CST")
 shead[time]="报告时间：${shead[time_raw]}"
 shead[ltitle]=18
@@ -363,9 +388,8 @@ stail[link]="$Font_I报告链接：$Font_U"
 esac
 }
 countRunTimes(){
-local RunTimes=$(curl $CurlARG -s --max-time 10 "https://hits.xykt.de/net?action=hit" 2>&1)
-stail[today]=$(echo "$RunTimes"|jq '.daily')
-stail[total]=$(echo "$RunTimes"|jq '.total')
+stail[today]=""
+stail[total]=""
 }
 show_progress_bar(){
 show_progress_bar_ "$@" 1>&2
@@ -407,8 +431,8 @@ fi
 if [[ $is_dep -eq 0 || $is_nexttrace -eq 0 || $is_speedtest -eq 0 ]];then
 echo -e "Lacking necessary dependencies."
 [[ $is_dep -eq 0 ]]&&echo -e "Packages $Font_I${Font_Cyan}jq curl imagemagick mtr iperf3 stun bc$Font_Suffix will be installed using package manager$Font_Suffix."
-[[ $is_nexttrace -eq 0 ]]&&echo -e "Application $Font_I${Font_Cyan}nexttrace$Font_Suffix will be installed via $Font_Green${Font_I}curl nxtrace.org/nt |bash$Font_Suffix by ${Font_U}https://www.nxtrace.org/$Font_Suffix official."
-[[ $is_speedtest -eq 0 ]]&&echo -e "Application $Font_I${Font_Cyan}speedtest$Font_Suffix will be installed using ${Font_B}Speedtest.net$Font_Suffix official installation method ${Font_U}https://www.speedtest.net/apps/cli$Font_Suffix."
+[[ $is_nexttrace -eq 0 ]]&&echo -e "Application $Font_I${Font_Cyan}nexttrace $nexttrace_version$Font_Suffix will be downloaded from the official GitHub release, verified by SHA-256 and installed to $NETQ_BIN."
+[[ $is_speedtest -eq 0 ]]&&echo -e "Application $Font_I${Font_Cyan}speedtest $speedtest_version$Font_Suffix will be downloaded from ${Font_B}Speedtest.net$Font_Suffix official packages, verified by SHA-256 and installed to $NETQ_BIN."
 if [[ $mode_yes -eq 0 ]];then
 prompt=$(printf "Continue? (${Font_Green}y$Font_Suffix/${Font_Red}n$Font_Suffix): ")
 read -p "$prompt" choice
@@ -468,7 +492,7 @@ exit 1
 fi
 fi
 if [[ $is_nexttrace -eq 0 ]];then
-curl -s nxtrace.org/nt|bash
+install_nexttrace
 fi
 if [[ $is_speedtest -eq 0 ]];then
 install_speedtest
@@ -483,7 +507,7 @@ local package_manager=$1
 local install_command=$2
 case $package_manager in
 apt)$usesudo apt update
-$usesudo $install_command jq curl imagemagick mtr-tiny iperf3 stun bc procps
+$usesudo $install_command jq curl imagemagick mtr-tiny iperf3 stun-client bc procps
 ;;
 dnf)$usesudo $install_command epel-release
 $usesudo $package_manager makecache
@@ -517,33 +541,62 @@ xbps)$usesudo xbps-install -Sy
 $usesudo $install_command jq curl imagemagick mtr iperf3 bc procps-ng gcompat libstdc++
 esac
 }
+fetch_verified(){
+local url="$1" checksum="$2" dest="$3" tmp sum
+[[ -z $checksum ]]&&echo "No pinned checksum for $url" >&2&&return 1
+tmp=$(mktemp)||return 1
+if ! curl -fsSL --retry 2 --max-time 180 -o "$tmp" "$url";then
+rm -f "$tmp"
+echo "Download failed: $url" >&2
+return 1
+fi
+if command -v sha256sum >/dev/null 2>&1;then
+sum=$(sha256sum "$tmp"|cut -d' ' -f1)
+else
+sum=$(shasum -a 256 "$tmp"|cut -d' ' -f1)
+fi
+if [[ $sum != "$checksum" ]];then
+rm -f "$tmp"
+echo "Checksum mismatch, refused to install: $url" >&2
+return 1
+fi
+$usesudo mkdir -p "$(dirname "$dest")"&&$usesudo install -m 755 "$tmp" "$dest"
+local rc=$?
+rm -f "$tmp"
+return $rc
+}
+install_nexttrace(){
+local arch
+case "$(uname -m)" in
+x86_64|amd64)arch="amd64";;
+aarch64|arm64)arch="arm64";;
+i386|i686)arch="386";;
+armv7l|armv7)arch="armv7";;
+*)return 1
+esac
+fetch_verified "https://github.com/nxtrace/NTrace-core/releases/download/$nexttrace_version/nexttrace_linux_$arch" "${nexttrace_sha256[$arch]}" "$NETQ_BIN/nexttrace"
+}
 install_speedtest(){
 if [ "$(uname)" == "Darwin" ];then
 brew tap teamookla/speedtest
 brew update
 brew install speedtest --force
-elif [ "$(uname)" == "FreeBSD" ];then
-$usesudo pkg update&&sudo pkg install -g libidn2 ca_root_nss
-freebsd_version=$(freebsd-version|cut -d '-' -f 1)
-case $freebsd_version in
-12.*)$usesudo pkg add "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-freebsd12-x86_64.pkg"
-;;
-13.*)$usesudo pkg add "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-freebsd13-x86_64.pkg"
-;;
-*)return 1
-esac
-else
-local sys_type=""
-local sysarch="$(uname -m)"
-case "$sysarch" in
-"x86_64"|"x86"|"amd64"|"x64")sys_type="x86_64";;
-"i386"|"i686")sys_type="i386";;
-"aarch64"|"armv7l"|"armv8"|"armv8l")sys_type="aarch64";;
-*)return 1
-esac
-$usesudo curl -sL -o /usr/bin/speedtest "${rawgithub}main/ref/speedtest/speedtest-$sys_type"
-$usesudo chmod +x /usr/bin/speedtest
+return
 fi
+local sys_type
+case "$(uname -m)" in
+x86_64|x86|amd64|x64)sys_type="x86_64";;
+i386|i686)sys_type="i386";;
+aarch64|armv8|armv8l|arm64)sys_type="aarch64";;
+armv7l|armv7)sys_type="armhf";;
+*)return 1
+esac
+local dir
+dir=$(mktemp -d)||return 1
+if fetch_verified "https://install.speedtest.net/app/cli/ookla-speedtest-$speedtest_version-linux-$sys_type.tgz" "${speedtest_sha256[$sys_type]}" "$dir/speedtest.tgz"&&tar -xzf "$dir/speedtest.tgz" -C "$dir" speedtest;then
+$usesudo install -m 755 "$dir/speedtest" "$NETQ_BIN/speedtest"
+fi
+rm -rf "$dir"
 }
 install_stun(){
 local arch
@@ -568,8 +621,7 @@ riscv64)sys_type="riscv64"
 ;;
 *)return 1
 esac
-$usesudo curl -sL -o /usr/bin/stun "${rawgithub}main/ref/stun/stun_$sys_type"
-$usesudo chmod +x /usr/bin/stun
+fetch_verified "${rawgithub}$ref_commit/ref/stun/stun_$sys_type" "${stun_sha256[$sys_type]}" "$NETQ_BIN/stun"
 }
 declare -A browsers=(
 [Chrome]="139.0.7258.128 139.0.7258.67 138.0.7204.185 138.0.7204.170 138.0.7204.159 138.0.7204.102 138.0.7204.100 138.0.7204.51 138.0.7204.49 137.0.7151.122 138.0.7204.35 137.0.7151.121 137.0.7151.105 137.0.7151.104 137.0.7151.57 137.0.7151.55 136.0.7103.116 137.0.7151.40 136.0.7103.113 136.0.7103.92 135.0.7049.117 136.0.7103.48 135.0.7049.114 135.0.7049.86 135.0.7049.42 135.0.7049.41 134.0.6998.167 134.0.6998.119 134.0.6998.117 134.0.6998.37 134.0.6998.35 133.0.6943.128 133.0.6943.100 133.0.6943.59 133.0.6943.53 132.0.6834.162 133.0.6943.35 132.0.6834.160 132.0.6834.112 132.0.6834.110 131.0.6778.267 132.0.6834.83 131.0.6778.264 131.0.6778.204 131.0.6778.139 131.0.6778.109 131.0.6778.71 131.0.6778.69 130.0.6723.119 131.0.6778.33 130.0.6723.116 130.0.6723.71 130.0.6723.60 130.0.6723.58 129.0.6668.103 130.0.6723.44 129.0.6668.100 129.0.6668.72 129.0.6668.60 129.0.6668.42 128.0.6613.122 128.0.6613.121 128.0.6613.115 128.0.6613.113 127.0.6533.122 128.0.6613.36 127.0.6533.119 127.0.6533.100 127.0.6533.74 127.0.6533.72 126.0.6478.185 127.0.6533.57 126.0.6478.183 126.0.6478.128 126.0.6478.116 126.0.6478.114 126.0.6478.61 125.0.6422.176 126.0.6478.56 125.0.6422.144 126.0.6478.36 125.0.6422.142 125.0.6422.114 125.0.6422.77 125.0.6422.76 124.0.6367.210 125.0.6422.60 124.0.6367.208 124.0.6367.201 124.0.6367.156 125.0.6422.41 124.0.6367.155 124.0.6367.119 124.0.6367.92 124.0.6367.63 124.0.6367.61 123.0.6312.124 124.0.6367.60 123.0.6312.122 123.0.6312.106 123.0.6312.105 123.0.6312.60 123.0.6312.58 122.0.6261.131 123.0.6312.46 122.0.6261.129 122.0.6261.128 122.0.6261.112 122.0.6261.111 122.0.6261.71 122.0.6261.69 121.0.6167.189 122.0.6261.57 121.0.6167.187 121.0.6167.186 121.0.6167.162 121.0.6167.160 121.0.6167.140 121.0.6167.86 121.0.6167.85 120.0.6099.227 120.0.6099.225 121.0.6167.75 120.0.6099.224 120.0.6099.218 120.0.6099.216 120.0.6099.200 120.0.6099.199 120.0.6099.129 120.0.6099.110 120.0.6099.109 120.0.6099.62 120.0.6099.56"
@@ -594,10 +646,10 @@ local timeout=2
 local http_code
 http_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout "$timeout" "$url" 2>/dev/null)
 if [[ $http_code == "204" ]];then
-rawgithub="https://github.com/xykt/NetQuality/raw/"
+rawgithub="https://github.com/tanselxy/NetQuality/raw/"
 return 0
 else
-rawgithub="https://testingcf.jsdelivr.net/gh/xykt/NetQuality@"
+rawgithub="https://testingcf.jsdelivr.net/gh/tanselxy/NetQuality@"
 return 1
 fi
 }
@@ -2217,7 +2269,7 @@ iperf_test(){
 ibar_step=48
 local ipv=$1
 local port=0
-local json_data=$(curl -sL "${rawgithub}main/ref/iperf.json")
+local json_data=$(curl -sL "${rawgithub}$ref_commit/ref/iperf.json")
 while IFS=" " read -r code server portl portu city cityzh;do
 if [[ $YY == "cn" ]];then
 icity["$code"]="$cityzh"
@@ -2359,7 +2411,7 @@ echo "$color$(printf '%6s' "$result")$Font_Suffix"
 }
 speedtest_test(){
 ibar_step=36
-local json_data=$(curl -sL "${rawgithub}main/ref/speedtest_cn.json")
+local json_data=$(curl -sL "${rawgithub}$ref_commit/ref/speedtest_cn.json")
 declare -A codemax
 codemax[1]=0
 codemax[2]=0
@@ -2711,12 +2763,8 @@ shift
 esac
 done
 if [[ $mode_menu -eq 1 ]];then
-if [[ $YY == "cn" ]];then
-eval "bash <(curl -sL https://Check.Place) -N"
-else
-eval "bash <(curl -sL https://Check.Place) -EN"
-fi
-exit 0
+echo "Menu mode is not available in this fork."
+exit 1
 fi
 [[ $mode_ping -eq 1 ]]&&mode_skip+="567"
 [[ $mode_low -eq 1 ]]&&mode_skip+="6"
@@ -2733,75 +2781,12 @@ echo -ne "\r$shelp\n"
 exit 0
 }
 show_ad(){
-RANDOM=$(date +%s)
-local -a ads=()
-local i=1
-while :;do
-local content
-content=$(curl -fsL --max-time 5 "${rawgithub}main/ref/ad$i.ans")||break
-ads+=("$content")
-((i++))
-done
 ADLines=0
-local adCount=${#ads[@]}
-[[ $adCount -eq 0 ]]&&return
-local -a indices=()
-for ((i=1; i<=adCount; i++));do indices+=("$i");done
-for ((i=adCount-1; i>0; i--));do
-local j=$((RANDOM%(i+1)))
-local tmp=${indices[i]}
-indices[i]=${indices[j]}
-indices[j]=$tmp
-done
-local -a aad
-aad[0]=$(curl -sL --max-time 5 "${rawgithub}main/ref/sponsor.ans")
-for ((i=0; i<adCount; i++));do
-aad[${indices[i]}]="${ads[i]}"
-done
-local rows cols
-if ! read rows cols < <(stty size 2>/dev/null);then cols=0;fi
-print_pair(){
-local left="$1" right="$2"
-local -a L R
-mapfile -t L <<<"$left"
-mapfile -t R <<<"$right"
-local i
-for ((i=0; i<12; i++));do
-printf "%-72s$Font_Suffix     %-72s\n" "${L[i]}" "${R[i]}" 1>&2
-done
-ADLines=$((ADLines+12))
 }
-print_block(){
-echo "$1" 1>&2
-ADLines=$((ADLines+12))
-}
-if [[ $cols -ge 150 ]];then
-if ((adCount==0));then
-print_block "${aad[0]}"
-elif ((adCount%2==1));then
-print_pair "${aad[0]}" "${aad[1]}"
-local k
-for ((k=2; k<=adCount; k+=2));do
-print_pair "${aad[$k]}" "${aad[$((k+1))]}"
-done
-else
-print_block "${aad[0]}"
-local k
-for ((k=1; k<=adCount; k+=2));do
-print_pair "${aad[$k]}" "${aad[$((k+1))]}"
-done
-fi
-else
-echo "${aad[0]}" 1>&2
-for ((i=1; i<=adCount; i++));do
-echo "${aad[$i]}" 1>&2
-done
-ADLines=$(((adCount+1)*12))
-fi
-}
+
 read_ref(){
-ISO3166=$(curl -sL -m 10 "${rawgithub}main/ref/iso3166.json")
-RESPONSE=$(curl -sL -m 10 "${rawgithub}main/ref/province.json")
+ISO3166=$(curl -sL -m 10 "${rawgithub}$ref_commit/ref/iso3166.json")
+RESPONSE=$(curl -sL -m 10 "${rawgithub}$ref_commit/ref/province.json")
 while IFS=" " read -r province code short name;do
 pcode[$province]=$code
 pshort[$province]=$short
@@ -2828,7 +2813,7 @@ done
 fi
 while read -r as name;do
 AS_MAPPING["$as"]="$name"
-done < <(curl -sL "${rawgithub}main/ref/AS_Mapping.txt")
+done < <(curl -sL "${rawgithub}$ref_commit/ref/AS_Mapping.txt")
 }
 save_json(){
 local head_updates=""
@@ -2956,6 +2941,30 @@ speedtest_object="{
 netdata=$(echo "$netdata"|jq --argjson speedtest_object "$speedtest_object" '.Speedtest += [$speedtest_object]')
 fi
 done
+# fork 新增：第 5 章三网回程路由原来只在文字报告里，这里按「城市 × 运营商 × 协议」写进 JSON。
+# Global 为出境段（国际运营商），China 为国内入口线路（163 / CN2GT / CN2GIA / 4837 / 9929 / CMI / CMIN2 等）。
+if [[ $mode_skip != *"5"* && $mode_route -eq 0 ]];then
+local route_objects=()
+local i site rcity rcode risp rproto
+for ((i=1; i<=18; i++));do
+site=$(((i+1)/2))
+case $(((site-1)/3)) in
+0)rcity="北京";rcode="BJ";;
+1)rcity="上海";rcode="SH";;
+*)rcity="广州";rcode="GZ"
+esac
+case $(((site-1)%3)) in
+0)risp="CT";;
+1)risp="CU";;
+*)risp="CM"
+esac
+if ((i%2==0));then rproto="UDP";else rproto="TCP";fi
+route_objects+=("{\"City\": \"$rcity\", \"Code\": \"$rcode\", \"ISP\": \"$risp\", \"Protocol\": \"$rproto\", \"Global\": \"${rww[$i]:-null}\", \"China\": \"${rcn[$i]:-null}\"}")
+done
+local route_array
+route_array=$(printf '%s\n' "${route_objects[@]}"|jq -s .)
+netdata=$(echo "$netdata"|jq --argjson route_array "$route_array" '.Route = $route_array')
+fi
 }
 check_Net(){
 IP=$1
@@ -2966,6 +2975,7 @@ netdata='{
       "Local": {},
       "Connectivity": [],
       "Delay": [],
+      "Route": [],
       "Speedtest": [],
       "Transfer": []
     }'
@@ -2999,10 +3009,8 @@ local net_report=$(show_head
 [[ $mode_skip != *"6"* && $2 -eq 4 ]]&&show_speedtest
 [[ $mode_skip != *"7"* ]]&&show_iperf
 show_tail)
-[[ mode_json -eq 1 || mode_output -eq 1 || mode_privacy -eq 0 ]]&&save_json $2
-[[ mode_privacy -eq 0 ]]&&report_link=$(curl -$2 -s -X POST https://upload.check.place -d "type=net" --data-urlencode "json=$netdata" --data-urlencode "content=$net_report")
+[[ mode_json -eq 1 || mode_output -eq 1 ]]&&save_json $2
 [[ mode_json -eq 0 ]]&&echo -ne "\r$net_report\n"
-[[ mode_json -eq 0 && mode_privacy -eq 0 && $report_link == *"https://Report.Check.Place/"* ]]&&echo -ne "\r${stail[link]}$report_link$Font_Suffix\n"
 [[ mode_json -eq 1 ]]&&echo -ne "\r$netdata\n"
 echo -ne "\r\n"
 if [[ mode_output -eq 1 ]];then
@@ -3034,3 +3042,4 @@ clear
 show_ad
 [[ $IPV4work -ne 0 && $IPV4check -ne 0 ]]&&check_Net "$IPV4" 4
 [[ $IPV6work -ne 0 && $IPV6check -ne 0 ]]&&check_Net "$IPV6" 6
+exit 0
