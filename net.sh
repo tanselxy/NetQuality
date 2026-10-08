@@ -1,5 +1,5 @@
 #!/bin/bash
-script_version="v2026-09-01-tansel.5"
+script_version="v2026-09-01-tansel.6"
 # tanselxy/NetQuality：xykt/NetQuality 的 fork（AGPL-3.0）。改动：
 # - ref/ 数据文件固定读取 ref_commit，不再跟随上游 main 变化；
 # - 去掉运行计数、广告、报告上传（upload.check.place）与菜单模式的远程执行；
@@ -11,7 +11,7 @@ script_version="v2026-09-01-tansel.5"
 # - 核心依赖（jq、curl、mtr、bc、free）安装失败时以退出码 12 立即结束；
 # - 回程路由每项增加 Hops（逐跳明细：跳数、IP、最低延迟、AS、位置、运营商、经纬度），
 #   nexttrace 加 -M，不再把路由上传到 nxtrace 生成轨迹地图。
-# - 回程路由逐条串行并修正重试：nexttrace v1.7.3 不再输出 traceroute to，原判断让每条白跑 10 遍；
+# - 回程路由最多 3 条并发并修正重试：nexttrace v1.7.3 不再输出 traceroute to，原判断让每条白跑 10 遍；
 #   地理库 429 后其余追踪改用 disable-geoip；修正 Hidden 永不出现、软银跳与不回应探测的线路误判。
 ref_commit="d5b99484d51286374d24b892c1b54235dc282148"
 NETQ_BIN="${NETQ_BIN:-/usr/local/bin}"
@@ -1680,8 +1680,8 @@ rdomain[6]="sh-cm-v$ipv.ip.zstaticcdn.com"
 rdomain[7]="gd-ct-v$ipv.ip.zstaticcdn.com"
 rdomain[8]="gd-cu-v$ipv.ip.zstaticcdn.com"
 rdomain[9]="gd-cm-v$ipv.ip.zstaticcdn.com"
-# fork 修改：逐条串行。每个 nexttrace 都要单独向 api.nxtrace.org 取令牌，同一 IP 并发取会被限流（429）
-local max_threads=1
+# fork 修改：最多 3 条并发（原为 18）。每个 nexttrace 都要单独向 api.nxtrace.org 取令牌，同一 IP 并发取多了会被限流（429）
+local max_threads=3
 local available_memory=1024
 [[ "$(uname)" != "Darwin" ]]&&available_memory=$(free -m|awk '/Mem:/ {print $7}')
 local max_threads_by_memory=$(echo "$available_memory / 28"|bc)
