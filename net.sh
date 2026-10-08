@@ -1,5 +1,5 @@
 #!/bin/bash
-script_version="v2026-09-01-tansel.4"
+script_version="v2026-09-01-tansel.5"
 # tanselxy/NetQuality：xykt/NetQuality 的 fork（AGPL-3.0）。改动：
 # - ref/ 数据文件固定读取 ref_commit，不再跟随上游 main 变化；
 # - 去掉运行计数、广告、报告上传（upload.check.place）与菜单模式的远程执行；
@@ -11,6 +11,8 @@ script_version="v2026-09-01-tansel.4"
 # - 核心依赖（jq、curl、mtr、bc、free）安装失败时以退出码 12 立即结束；
 # - 回程路由每项增加 Hops（逐跳明细：跳数、IP、最低延迟、AS、位置、运营商、经纬度），
 #   nexttrace 加 -M，不再把路由上传到 nxtrace 生成轨迹地图。
+# - 回程路由逐条串行并修正重试：nexttrace v1.7.3 不再输出 traceroute to，原判断让每条白跑 10 遍；
+#   地理库 429 后其余追踪改用 disable-geoip；修正 Hidden 永不出现、软银跳与不回应探测的线路误判。
 ref_commit="d5b99484d51286374d24b892c1b54235dc282148"
 NETQ_BIN="${NETQ_BIN:-/usr/local/bin}"
 nexttrace_version="v1.7.3"
@@ -1350,21 +1352,39 @@ fi
 done
 ((count%resu_per_line!=0))&&echo
 }
+# fork 新增：有回应的跳里八成以上是「网络故障」（地理库查询失败的占位），说明这遍没查到地理信息
+route_geo_failed(){
+awk -F'|' '$1 ~ /^[0-9]+$/ && $2 != "*" && NF>=10 {n++; if($6=="网络故障") f++} END {exit !(n>0 && f*5>=n*4)}' <<<"$1"
+}
 nexttrace_test(){
 local domain="$1"
 local rmode="$2"
 local rnum="$3"
 local ipv="$4"
 local response
-local max_retries=10
-local retry_delay=5
-local retry_count=0
-while [[ $retry_count -lt $max_retries ]];do
-response=$(timeout -s SIGKILL 50 nexttrace -p 80 -q 8 -"$ipv" --"$rmode" --raw -M --psize 1400 "$domain" 2>/dev/null)
-[[ $response != *"*please try again later*"* && $response == *"traceroute to"* ]]&&break
-retry_count=$((retry_count+1))
-[[ $retry_count -lt $max_retries ]]&&sleep "$retry_delay"
+# fork 修改：nexttrace v1.7.3 的表头是「源 IP -> 目标」，不再输出 traceroute to，原来的判断让每条
+# 追踪都白跑满 10 遍，每遍都向 api.nxtrace.org 取一次令牌，足以把机器 IP 打进限流。
+# 现在以出现逐跳行为成功；地理库返回 429 后其余追踪不再查地理库（重试只会延长限流）；
+# 只是超时导致有回应的跳几乎全是「网络故障」时，退避重试，最多 3 遍
+local errfile="$route_hops_dir/err_${ipv}_$rnum"
+local limited="$route_hops_dir/geo_limited"
+local geo_opt=()
+local attempt
+for attempt in 1 2 3;do
+[[ -f $limited ]]&&geo_opt=(--data-provider disable-geoip)
+response=$(timeout -s SIGKILL 50 nexttrace -p 80 -q 8 -"$ipv" --"$rmode" --raw -M --psize 1400 "${geo_opt[@]}" "$domain" 2>"$errfile")
+grep -q "too many requests" "$errfile" 2>/dev/null&&: >"$limited"
+if ! grep -qE '^[0-9]+\|' <<<"$response";then
+[[ $attempt -lt 3 ]]&&sleep 5
+continue
+fi
+[[ -f $limited ]]&&break
+route_geo_failed "$response"||break
+[[ $attempt -lt 3 ]]&&sleep $((attempt*10))
 done
+# 退避重试后仍查不到，说明地理库这会儿不可用：其余追踪也不再查，免得每条都耗满重试把总时长拖过超时
+[[ ! -f $limited ]]&&route_geo_failed "$response"&&: >"$limited"
+rm -f "$errfile"
 declare -A ips asns regions orgs
 local max_hop=0
 local cn_hop=0
@@ -1382,6 +1402,8 @@ local asn="${elements[4]}"
 local region="${elements[5]}"
 [[ ${elements[6]} == "香港" || ${elements[6]} == "澳门" || ${elements[6]} == "台湾" ]]&&region="${elements[6]}"
 local org="${elements[9]}"
+# -q 8 时同一跳有多行，不回应的探测（N|*||||||）不能占住这一跳，取第一个有回应的
+[[ -z $ip || $ip == "*" ]]&&continue
 [[ -n ${ips[$hop]} ]]&&continue
 [[ $ip == 59.43.* ]]&&asn="4809"
 [[ $org == *CTGNet* ]]&&asn="23764"
@@ -1399,8 +1421,14 @@ done <<<"$response"
 if [[ -n $route_hops_dir ]];then
 echo "$response"|awk -F'|' '$1 ~ /^[0-9]+$/ && NF>=10 {h=$1+0; for(k=2;k<=10;k++) gsub(/\t/," ",$k); if(!(h in ip)){ip[h]=$2; asn[h]=$5; loc[h]=$6" "$7" "$8; org[h]=$10; lat[h]=$11; lng[h]=$12} if($4!="" && (!(h in rtt) || $4+0<rtt[h]+0)) rtt[h]=$4; if(h>max) max=h} END {for(i=1;i<=max;i++){if(i in ip) printf "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", i, ip[i], rtt[i], asn[i], loc[i], org[i], lat[i], lng[i]; else printf "%d\t*\t\t\t\t\t\t\n", i}}' >"$route_hops_dir/${ipv}_$rnum" 2>/dev/null
 fi
-[[ $cn_hop == 0 || $cn_hop == $max_hop ]]&&tresucn="Hidden"
-[[ ${asns[$cn_hop]} == "17676" ]]&&cn_hop=$((cn_hop+1))
+# fork 修改：原来这里先置 Hidden，但下面 case 的每个分支都会覆盖，Hidden 从来出不来，改到 case 之后判断。
+# 软银（17676）的 IP 常被定位到国内，进入国内的那一跳要往后找第一个有 AS 的跳，下一跳不回应时不能停在空 AS 上
+local entry_hop=$cn_hop
+if [[ ${asns[$cn_hop]} == "17676" ]];then
+for ((hop=cn_hop+1; hop<=max_hop; hop++));do
+[[ -n ${asns[$hop]} ]]&&cn_hop=$hop&&break
+done
+fi
 case "${asns[$cn_hop]}" in
 "4134")tresucn="163"
 ;;
@@ -1457,6 +1485,13 @@ elif [[ $all_asn == *AS4837* ]];then
 tresucn="4837"
 fi
 esac
+# 查到了 AS 却认不出骨干网，且进入国内后有不回应的跳：是骨干节点藏起来了，标「路由隐藏」；
+# 一个 AS 都没有（地理库失败或已关闭）时保持 NoData
+if [[ $tresucn == "NoData" && -n $all_asn ]];then
+for ((hop=entry_hop>0?entry_hop:1; hop<max_hop; hop++));do
+[[ -z ${ips[$hop]} ]]&&tresucn="Hidden"&&break
+done
+fi
 for ((hop=cn_hop-1; hop>0; hop--));do
 if [[ -n ${asns[$hop]} && ${asns[$hop]} != "58453" && ${asns[$hop]} != "58807" && ${asns[$hop]} != "4837" && ${asns[$hop]} != "10099" && ${asns[$hop]} != "9929" && ${asns[$hop]} != "4134" && ${asns[$hop]} != "4809" && ${asns[$hop]} != "4808" && ${asns[$hop]} != "23764" && ${asns[$hop]} != "4538" && ${asns[$hop]} != "7497" ]];then
 tresuww="AS${asns[$hop]}"
@@ -1645,7 +1680,8 @@ rdomain[6]="sh-cm-v$ipv.ip.zstaticcdn.com"
 rdomain[7]="gd-ct-v$ipv.ip.zstaticcdn.com"
 rdomain[8]="gd-cu-v$ipv.ip.zstaticcdn.com"
 rdomain[9]="gd-cm-v$ipv.ip.zstaticcdn.com"
-local max_threads=18
+# fork 修改：逐条串行。每个 nexttrace 都要单独向 api.nxtrace.org 取令牌，同一 IP 并发取会被限流（429）
+local max_threads=1
 local available_memory=1024
 [[ "$(uname)" != "Darwin" ]]&&available_memory=$(free -m|awk '/Mem:/ {print $7}')
 local max_threads_by_memory=$(echo "$available_memory / 28"|bc)
